@@ -301,9 +301,18 @@ This option holds the number of times `objed-last' can
 be used to restore previous states."
   :type 'integer)
 
+(defvar objed--isearch-cmds
+  '(isearch-forward
+    isearch-forward-regexp
+    isearch-forward-symbol
+    isearch-backward
+    isearch-backward-regexp
+    isearch-forward-symbol-at-point
+    isearch-forward-word)
+  "Isearch commands known to objed.")
 
 (defcustom objed-keeper-commands
-  '(save-buffer
+  `(save-buffer
     read-only-mode
     undo
     undo-only
@@ -315,12 +324,15 @@ be used to restore previous states."
     kmacro-start-macro-or-insert-counter
     kmacro-end-or-call-macro
     kmacro-call-macro
+    ,@objed--isearch-cmds
     )
   "Regular Emacs commands which should not exit modal edit state.
 
 When regular commands are executed `objed' will exit its editing
 state. Commands added to this list wont do that."
   :type '(repeat function))
+
+
 
 (defcustom objed-cursor-color "#e52b50"
   "Cursor color to use when `objed' is active."
@@ -1503,6 +1515,8 @@ one of `objed-keeper-commands'."
     (or (commandp ocmd)
         objed--with-allow-input
         (and this-command
+             ;; those are handled on exit in objed--reset--objed-buffer
+             (not (memq this-command objed--isearch-cmds))
              (or (memq this-command objed-keeper-commands)
                  (assq this-command objed-cmd-alist))
              (prog1 #'ignore
@@ -2237,8 +2251,9 @@ On repeat or at boundary move to next."
       (goto-char (point-min))
       (when (re-search-forward format nil t)
         (goto-char (match-beginning 0))
-        (when (= (point) ib)
-          (message "No previous indentifier"))))))
+        (if (= (point) ib)
+            (message "No other instance found")
+          (message "Moved to first insance"))))))
 
 ;;;###autoload
 (defun objed-last-identifier ()
@@ -2252,8 +2267,9 @@ On repeat or at boundary move to next."
     (when format
       (goto-char (point-max))
       (re-search-backward format nil t)
-      (when (= (point) ib)
-        (message "No next indentifier")))))
+      (if (= (point) ib)
+          (message "No other instance found")
+        (message "Moved to last insance")))))
 
 ;;;###autoload
 (defun objed-next-identifier ()
@@ -2967,49 +2983,68 @@ Moves point over any whitespace afterwards."
 
 Swaps the current object with the next one."
   (interactive)
-  (let* ((current (buffer-substring (objed--beg)
-                                    (objed--end)))
+  (let ((reg (use-region-p)))
+    (when reg
+      (setq objed--current-obj
+            (objed-make-object :beg (region-beginning)
+                               :end (region-end)))
+      (deactivate-mark))
 
-         (nexto (objed--get-next))
-         (next (and nexto (apply #'buffer-substring
-                                 (objed--current nexto))))
-         (nend (objed--end nexto)))
-    (apply #'delete-region (objed--current nexto))
-    (goto-char (objed--beg nexto))
-    (insert current)
+    (let* ((current (buffer-substring (objed--beg)
+                                      (objed--end)))
+           (nexto (objed--get-next))
+           (next (and nexto (apply #'buffer-substring
+                                   (objed--current nexto))))
+           (nend (objed--end nexto)))
+      (apply #'delete-region (objed--current nexto))
+      (goto-char (objed--beg nexto))
+      (insert current)
 
-    (apply #'delete-region (objed--current))
-    (goto-char (objed--beg))
-    (insert next)
+      (apply #'delete-region (objed--current))
+      (goto-char (objed--beg))
+      (insert next)
 
-    (goto-char (- nend (length current)))
-    (objed--update-current-object)))
-
+      (when reg
+        (push-mark nend t t)
+        (setq deactivate-mark nil))
+      (goto-char (- nend (length current)))
+      (unless reg
+        (objed--update-current-object)))))
 
 (defun objed-move-object-backward ()
   "Move object backward.
 
 Swaps the current object with the previous one."
   (interactive)
-  (let* ((current (buffer-substring (objed--beg)
-                                    (objed--end)))
+  (let ((reg (use-region-p)))
+    (when reg
+      (setq objed--current-obj
+            (objed-make-object :beg (region-beginning)
+                               :end (region-end)))
+      (deactivate-mark))
 
-         (prevo (objed--get-prev))
-         (prev (and prevo (apply #'buffer-substring
-                                 (objed--current prevo))))
-         (pbeg (objed--beg prevo)))
+    (let* ((current (buffer-substring (objed--beg)
+                                      (objed--end)))
 
-    (apply #'delete-region (objed--current))
-    (goto-char (objed--beg))
-    (insert prev)
+           (prevo (objed--get-prev))
+           (prev (and prevo (apply #'buffer-substring
+                                   (objed--current prevo))))
+           (pbeg (objed--beg prevo)))
 
-    (apply #'delete-region (objed--current prevo))
-    (goto-char (objed--beg prevo))
-    (insert current)
-    (goto-char pbeg)
-    (objed--update-current-object)))
+      (apply #'delete-region (objed--current))
+      (goto-char (objed--beg))
+      (insert prev)
 
+      (apply #'delete-region (objed--current prevo))
+      (goto-char (objed--beg prevo))
+      (insert current)
 
+      (when reg
+        (push-mark (point) t t)
+        (setq deactivate-mark nil))
+      (goto-char pbeg)
+      (unless reg
+        (objed--update-current-object)))))
 
 (defun objed--switch-and-move (o dir)
   "Switch to object O and move it in direction DIR."
@@ -3871,7 +3906,17 @@ Reset and reinitilize objed if appropriate."
               (set (car setting) (cdr setting))
             (kill-local-variable setting))))
       (remove-hook 'pre-command-hook 'objed--push-state t)
+
+      (when (and (memq this-command objed--isearch-cmds)
+                 (memq this-command objed-keeper-commands))
+        (add-hook 'isearch-mode-end-hook #'objed-reactivate-after-isearch))
+
       (run-hooks 'objed-exit-hook))))
+
+(defun objed-reactivate-after-isearch ()
+  "Reactivate objed after isearch."
+  (remove-hook 'isearch-mode-end-hook #'objed-reactivate-after-isearch)
+  (run-at-time 0 nil #'objed-activate))
 
 (defun objed--reset ()
   "Reset variables and state information."
